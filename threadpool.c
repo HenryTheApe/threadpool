@@ -10,6 +10,17 @@
 #include <stdbool.h>
 #include <assert.h>
 
+/** Macro enabled by compiler flag, for added messages to stderr.
+ *  With gcc, add "-D DEBUG_MSG"
+ */
+
+
+#ifdef DEBUG_MSG_ON
+  #define DEBUG_MSG(...) fprintf(stderr, ##__VA_ARGS__)
+#else
+  #define DEBUG_MSG(...) do {} while(0);
+#endif
+
 /** Macro for printing detailed error location. */
 #ifndef PRINT_ERROR_LOCATION
   #define PRINT_ERROR_LOCATION \
@@ -125,11 +136,13 @@ int worker_thread(void* arg) {
 
     // Check if the thread pool is being deleted
     if (pool->pool_to_be_deleted) {
+      DEBUG_MSG("worker: tbd\n");
       break;
     }
     // Check if there is work available
     if (!pool->task_head) { // No tasks in queue
       // Mark as idle
+      DEBUG_MSG("worker: idle\n");
       pool->pool_threads_active--;
       pool->pool_threads_idle++;
 
@@ -147,20 +160,24 @@ int worker_thread(void* arg) {
       }
       // Wait for more tasks; meanwhile cede lock
       while ((!pool->task_head) && (!pool->pool_to_be_deleted)) {
+        DEBUG_MSG("worker: wait for new tasks\n");
         int err = cnd_wait(&pool->pool_new_work_available, &pool->pool_lock);
         if (err) {
           fprintf(stderr, "error waiting for new work, code %d", err);
           exit(EXIT_FAILURE);
         }
       }
+      DEBUG_MSG("worker: active\n");
       pool->pool_threads_active++;
       pool->pool_threads_idle--;
       // Check if it has only been woken up to delete the thread pool
       if (pool->pool_to_be_deleted) {
+        DEBUG_MSG("worker: tbd\n");
         break;
       }
     }
     // There is a task in queue
+    DEBUG_MSG("worker: acquire task\n");
     // Obtain function and argument pointers
     task_queue* temp = pool->task_head;
 
@@ -174,6 +191,7 @@ int worker_thread(void* arg) {
       PRINT_ERROR_LOCATION;
       exit(EXIT_FAILURE);
     }
+    DEBUG_MSG("worker: cede lock\n");
 
     // Call task function.
     // (Call from the struct avoids compiler warnings)
@@ -183,6 +201,7 @@ int worker_thread(void* arg) {
     thrd_yield();
     // Return to beginning of the loop
   }
+  DEBUG_MSG("worker: delete thread\n");
   // Thread will close after exiting loop
   pool->pool_threads_active--;
   // Check if this is the last thread being deleted
@@ -360,16 +379,20 @@ size_t threadpool_active_num(threadpool* pool) {
 }
 
 void threadpool_destroy(threadpool* pool) {
+  DEBUG_MSG("mark pool tbd\n");
   // Mark pool to be deleted (new tasks will stop being executed)
   pool->pool_to_be_deleted = true;
+  DEBUG_MSG("wake up idle workers\n");
   // Wake up idle workers, cede lock to each
   while (pool->pool_threads_idle || pool->pool_threads_active) {
+    DEBUG_MSG("acquire lock\n");
     int err = mtx_lock(&pool->pool_lock);
     if (err) {
       fprintf(stderr, "lock error %d", err);
       PRINT_ERROR_LOCATION;
       exit(EXIT_FAILURE);
     }
+    DEBUG_MSG("broadcast\n");
     err = cnd_broadcast(&pool->pool_new_work_available);
     if (err) {
       fprintf(stderr, "condition broadcast %d", err);
@@ -384,6 +407,7 @@ void threadpool_destroy(threadpool* pool) {
     }
     thrd_yield();
   }
+  DEBUG_MSG("done waking up workers. reacquiring lock\n");
   assert(!pool->pool_threads_idle);
   int err = mtx_lock(&pool->pool_lock);
   if (err) {
@@ -392,6 +416,7 @@ void threadpool_destroy(threadpool* pool) {
       exit(EXIT_FAILURE);
   }
   // Wait for last thread to be deleted, then reacquire lock
+  DEBUG_MSG("waiting on last thread to be deleted\n");
   while (pool->pool_threads_active) {
     cnd_wait(&pool->pool_threads_deleted, &pool->pool_lock);
   }
@@ -400,6 +425,7 @@ void threadpool_destroy(threadpool* pool) {
   assert(!pool->pool_threads_idle);
   //assert(!pool->pool_threads_num);
 
+  DEBUG_MSG("cleanup\n");
   // Destroy remaining tasks
   while (pool->task_head) {
     task_queue* task = pool->task_head;
